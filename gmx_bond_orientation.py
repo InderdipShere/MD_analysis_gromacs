@@ -41,6 +41,7 @@ def get_cli_args():
     parser.add_argument('--sel_mol', type=str2bool, nargs='*', default=None, help='Use center-of-mass (COM) for selection group(s).')
     parser.add_argument('-direction_species', '--direction_species', required=True, nargs='+', help='Two atom names defining direction vector for each pair (same length as --ref).')
     parser.add_argument('--direction_mol', type=str2bool, nargs='*', default=None, help='Molecule-based direction (1) or atom-based (0). Default: False.')
+    parser.add_argument('--direction_rcut', type=float, nargs='*', default=None, help='Cutoff distance(s) (nm) for direction bonds. If specified, finds all atom2 within cutoff (any molecule) and averages direction vectors.')
     parser.add_argument('--mass_file', type=str, default=None, help='File containing atomic masses for COM calculation (required if using COM).')
     parser.add_argument('--rcut', type=float, nargs='+', required=True, help='Cutoff distance(s) (nm) for bond detection. Can be: single value (for all pairs) or multiple values (one per pair).')
     parser.add_argument('--begin', type=int, default=0, help='First frame to read from trajectory.')
@@ -294,8 +295,9 @@ def process_frame_positions(args, groups, groups_mol, coords, box, atom_info):
     Extract and process positions for a single frame.
     Also extract direction vectors from direction_species.
     
-    Direction vector for a molecule: vector from atom1 to atom2 in same molecule.
-    atom2 can come from a different molecule (only needs to be within rcut).
+    Two modes:
+    1. Without --direction_rcut: vector from atom1 to closest atom2 (any molecule)
+    2. With --direction_rcut: finds all atom2 within cutoff distance (any molecule), averages direction vectors
     
     Returns:
         Dictionary with reference, selection positions and direction vectors for all pairs
@@ -334,14 +336,16 @@ def process_frame_positions(args, groups, groups_mol, coords, box, atom_info):
             frame_data[('dir_vec', i)] = None
             continue
         
-        # For each molecule, compute direction vector from atom1 in that molecule to atom2 (any molecule)
+        # Determine if using direction_rcut mode
+        use_direction_rcut = args.direction_rcut is not None and len(args.direction_rcut) > i
+        direction_rcut_val = args.direction_rcut[i] if use_direction_rcut else None
+        
+        # For each molecule, compute direction vector from atom1 in that molecule
         direction_vectors = {}
         
         # For each atom1 occurrence (each molecule that has atom1)
         for idx1 in atom1_indices:
             mol_no = atom_info[idx1][0]  # Molecule ID where atom1 is located
-            
-            # Find closest atom2 (could be from any molecule)
             pos1 = coords[idx1]
             atom2_positions = coords[atom2_indices]
             
@@ -350,15 +354,30 @@ def process_frame_positions(args, groups, groups_mol, coords, box, atom_info):
             deltas -= box[:3] * np.round(deltas / box[:3])
             distances = np.linalg.norm(deltas, axis=1)
             
-            # Find closest atom2
-            closest_idx2 = atom2_indices[np.argmin(distances)]
-            pos2 = coords[closest_idx2]
-            
-            # Compute direction vector with MIC
-            delta = pos2 - pos1
-            delta -= box[:3] * np.round(delta / box[:3])
-            
-            direction_vectors[mol_no] = delta
+            if use_direction_rcut:
+                # Find all atom2 within direction_rcut (from ANY molecule)
+                bonded_mask = distances <= direction_rcut_val
+                bonded_indices = np.where(bonded_mask)[0]
+                
+                if len(bonded_indices) == 0:
+                    # No direction bonds found within cutoff
+                    logging.debug(f"Pair {i}, mol {mol_no}: No direction bonds within {direction_rcut_val} nm")
+                    continue
+                
+                # Average direction vectors from all bonded atom2s (any molecule)
+                bonded_deltas = deltas[bonded_indices]
+                avg_delta = np.mean(bonded_deltas, axis=0)
+                direction_vectors[mol_no] = avg_delta
+            else:
+                # Find closest atom2 (original behavior, from any molecule)
+                closest_idx2 = atom2_indices[np.argmin(distances)]
+                pos2 = coords[closest_idx2]
+                
+                # Compute direction vector with MIC
+                delta = pos2 - pos1
+                delta -= box[:3] * np.round(delta / box[:3])
+                
+                direction_vectors[mol_no] = delta
         
         frame_data[('dir_vec', i)] = direction_vectors
     
@@ -559,6 +578,11 @@ def normalize_and_output(args, orientations_per_frame, total_frames, ref_counts,
     for i, direction_pair in enumerate(args.direction_species_pairs):
         logging.info(f"  Pair {i}: {direction_pair[0]} -> {direction_pair[1]}")
     
+    if args.direction_rcut is not None:
+        logging.info("\nDirection bond cutoffs:")
+        for i, (ref_name, sel_name) in enumerate(zip(args.ref, args.sel)):
+            logging.info(f"  {ref_name}-{sel_name}: {args.direction_rcut[i]:.3f} nm (finds all atom2 within cutoff and averages direction vectors)")
+    
     for i, (ref_name, sel_name) in enumerate(zip(args.ref, args.sel)):
         N_ref = int(ref_counts[i])
         N_sel = int(sel_counts[i])
@@ -738,6 +762,14 @@ def main():
     else:
         need_mass_file = True
     
+    # Process direction_rcut flags
+    if args.direction_rcut is None:
+        args.direction_rcut = None
+    elif len(args.direction_rcut) == 1:
+        args.direction_rcut = args.direction_rcut * nref
+    elif len(args.direction_rcut) != nref:
+        raise ValueError(f"--direction_rcut must have length 1 or {nref}, but got {len(args.direction_rcut)}")
+    
     if need_mass_file:
         if args.mass_file is None:
             raise ValueError("Mass file is required for COM calculations but not provided.")
@@ -841,6 +873,15 @@ def main():
         logging.info(f"Cutoff distances (rcut):")
         for i, (ref_name, sel_name) in enumerate(zip(args.ref, args.sel)):
             logging.info(f"  {ref_name}-{sel_name}: {args.rcut[i]:.3f} nm")
+    
+    # Log direction_rcut if specified
+    if args.direction_rcut is not None:
+        if len(set(args.direction_rcut)) == 1:
+            logging.info(f"Direction bond cutoff (direction_rcut): {args.direction_rcut[0]:.3f} nm (all pairs)")
+        else:
+            logging.info(f"Direction bond cutoffs (direction_rcut):")
+            for i, (ref_name, sel_name) in enumerate(zip(args.ref, args.sel)):
+                logging.info(f"  {ref_name}-{sel_name}: {args.direction_rcut[i]:.3f} nm")
     
     # Get initial counts
     ref_counts = np.zeros(len(args.ref))
