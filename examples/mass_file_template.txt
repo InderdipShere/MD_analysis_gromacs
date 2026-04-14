@@ -1,0 +1,57 @@
+# Mass File Template for Center-of-Mass (COM) Calculations
+# 
+# Format: 
+#   [GROUP_NAME]
+#   atom_name = mass_value
+#   atom_name = mass_value
+#
+# Notes:
+# - Group names must match those in the GROMACS index file
+# - Atom names must match those in the structure file
+# - Mass values in atomic mass units (amu)
+# - Lines starting with '#' are comments
+#
+
+# Example for ionic liquids
+[LI]
+LI = 6.94
+
+[Cl]
+Cl = 35.45
+
+[Na]
+Na = 22.99
+
+# Example for lipid membranes
+[CHOL]
+# Cholesterol atom masses
+C = 12.01
+H = 1.008
+O = 16.00
+
+[DPPC]
+# 1,2-dipalmitoyl-sn-glycero-3-phosphocholine
+C = 12.01
+H = 1.008
+O = 16.00
+N = 14.01
+P = 30.97
+
+# Common atomic masses reference:
+# H  =  1.008
+# C  = 12.01
+# N  = 14.01
+# O  = 16.00
+# P  = 30.97
+# S  = 32.07
+# Cl = 35.45
+# K  = 39.10
+# Ca = 40.08
+# Li = 6.94
+# Na = 22.99
+# Mg = 24.31
+# Al = 26.98
+# Si = 28.09
+# F  = 19.00
+# Br = 79.90
+# I  = 126.9
