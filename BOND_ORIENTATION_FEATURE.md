@@ -7,7 +7,9 @@
 ### Key Concepts
 
 - **Bond**: Connection between atoms in reference and selection groups (distance ≤ rcut)
-- **Reference Direction**: Defined by vector from atom1 to closest atom2 within each molecule (atom2 can be from different molecule)
+- **Reference Direction**: Vector from atom1 to atom2 within each molecule
+  - **Without --direction_rcut**: Uses the closest atom2 from any molecule
+  - **With --direction_rcut**: Finds all atom2 within cutoff distance (any molecule) and averages direction vectors
 - **Orientation Angle**: Angle between bond vector (ref→sel) and reference direction vector, in degrees (0-180°)
 - **Filtering**: Only bonds from reference atoms in molecules that have atom1 are analyzed
 
@@ -25,6 +27,7 @@ python gmx_bond_orientation.py \
   --sel_mol <0|1> [<0|1> ...] \
   -direction_species <atom1_ref> <atom2_ref> [<atom1_ref2> <atom2_ref2> ...] \
   --direction_mol <0|1> [<0|1> ...] \
+  [--direction_rcut <rcut_dir1> [<rcut_dir2> ...]] \
   --rcut <rcut1> [<rcut2> ...] \
   [--mass_file <mass_file.txt>] \
   [--begin <frame>] [--end <frame>] [--skip <N>] \
@@ -52,6 +55,7 @@ python gmx_bond_orientation.py \
 | `--ref_mol` | Use center-of-mass for ref groups (0/1) | 0 (atom-based) |
 | `--sel_mol` | Use center-of-mass for sel groups (0/1) | 0 (atom-based) |
 | `--direction_mol` | Use COM for direction atoms (0/1) | 0 (atom-based) |
+| `--direction_rcut` | Cutoff distance(s) for direction bonds (nm) | None (use closest atom2) |
 | `--mass_file` | File with atomic masses (required if using COM) | None |
 | `--begin` | First frame to process | 0 |
 | `--end` | Last frame to process (-1 = end) | -1 |
@@ -178,6 +182,21 @@ python gmx_bond_orientation.py \
   --rcut 0.35 \
   -dist 36  # 36 bins = 5° per bin
 ```
+
+### With Direction Bond Cutoff (Averaged Direction Vectors)
+
+```bash
+python gmx_bond_orientation.py \
+  -s traj.gro \
+  -f traj.gro \
+  -n index.ndx \
+  --ref Ch --sel ChCl_Cl \
+  -direction_species ChCl_N ChCl_O \
+  --direction_rcut 0.35 \
+  --rcut 0.35 \
+  -dist 36
+```
+This finds all ChCl_O atoms within 0.35 nm of each ChCl_N and averages their direction vectors, providing a more robust reference direction.
 
 ### Multiple Bond Pairs
 
