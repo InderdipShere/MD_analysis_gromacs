@@ -630,7 +630,7 @@ def normalize_and_output(args, bond_counts, bond_lengths_avg, total_frames, ref_
 
 def generate_distance_distribution(args, bond_distances, ref_counts, sel_counts):
     """
-    Generate and write bond distance distribution histograms.
+    Generate and write bond distance distribution as probability distributions.
     
     Args:
         args: command-line arguments (contains -dist N)
@@ -641,7 +641,7 @@ def generate_distance_distribution(args, bond_distances, ref_counts, sel_counts)
     if args.dist is None or bond_distances is None:
         return
     
-    logging.info("\n--- Bond Distance Distribution ---")
+    logging.info("\n--- Bond Distance Probability Distribution ---")
     
     n_pairs = len(args.ref)
     n_bins = args.dist
@@ -655,6 +655,7 @@ def generate_distance_distribution(args, bond_distances, ref_counts, sel_counts)
     # Create bin edges: from 0 to max(rcut)
     bin_edges = np.linspace(0, max_rcut, n_bins + 1)
     bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2.0
+    bin_width = bin_edges[1] - bin_edges[0]
     
     output_data = [bin_centers]
     header = "# distance(nm)"
@@ -663,33 +664,43 @@ def generate_distance_distribution(args, bond_distances, ref_counts, sel_counts)
         rcut_pair = args.rcut[i]
         
         if bond_distances[i] is None or len(bond_distances[i]) == 0:
-            hist = np.zeros(n_bins)
-            logging.info(f"Distance distribution for pair {ref_name}-{sel_name}: No bonds found")
+            prob_dist = np.zeros(n_bins)
+            logging.info(f"Distance probability distribution for pair {ref_name}-{sel_name}: No bonds found")
         else:
-            # Create histogram with bin edges adjusted to the pair's rcut if needed
+            # Create histogram
             hist, _ = np.histogram(bond_distances[i], bins=bin_edges)
             
-            logging.info(f"Distance distribution for pair {ref_name}-{sel_name}:")
+            # Normalize to probability distribution
+            # Probability = count / (total_count * bin_width)
+            # This gives probability density: integral over all distances = 1
+            total_count = np.sum(hist)
+            prob_dist = hist / (total_count * bin_width) if total_count > 0 else hist
+            
+            logging.info(f"Distance probability distribution for pair {ref_name}-{sel_name}:")
             logging.info(f"  Total bonded pairs: {len(bond_distances[i])}")
             logging.info(f"  Min distance: {np.min(bond_distances[i]):.6f} nm")
             logging.info(f"  Max distance: {np.max(bond_distances[i]):.6f} nm")
             logging.info(f"  Mean distance: {np.mean(bond_distances[i]):.6f} nm")
             logging.info(f"  Median distance: {np.median(bond_distances[i]):.6f} nm")
-            logging.info(f"  Histogram bins: {n_bins}, range: 0.0-{max_rcut:.3f} nm")
+            logging.info(f"  Std dev: {np.std(bond_distances[i]):.6f} nm")
+            logging.info(f"  Histogram bins: {n_bins}, range: 0.0-{max_rcut:.3f} nm, bin width: {bin_width:.6f} nm")
+            logging.info(f"  Integration check (should be ~1.0): {np.sum(prob_dist) * bin_width:.6f}")
         
-        output_data.append(hist)
-        header += f" hist_{ref_name}-{sel_name}"
+        output_data.append(prob_dist)
+        header += f" P(d)_{ref_name}-{sel_name}"
     
     # Write distance distribution output
     with open(dist_output_file, 'w') as f:
         f.write(header + "\n")
         np.savetxt(f, np.column_stack(output_data), fmt='%12.6f')
+        f.write("# Probability density distribution: P(d) = dP/dd\n")
+        f.write("# Integral of P(d) * dd over all distances = 1.0\n")
         f.write("# Total number of Ref:\n")
         f.write(f"# {', '.join([f'{name}: {int(count)}' for name, count in zip(args.ref, ref_counts)])}\n")
         f.write("# Total number of sel:\n")
         f.write(f"# {', '.join([f'{name}: {int(count)}' for name, count in zip(args.sel, sel_counts)])}\n")
     
-    logging.info(f"Distance distribution data written to {dist_output_file}")
+    logging.info(f"Distance probability distribution written to {dist_output_file}")
 
 
 def main():
