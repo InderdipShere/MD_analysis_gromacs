@@ -42,6 +42,7 @@ def get_cli_args():
     parser.add_argument('--begin', type=int, default=0, help='First frame to read from trajectory.')
     parser.add_argument('--end', type=int, default=-1, help='Last frame to read from trajectory. Use -1 for end.')
     parser.add_argument('--skip', type=int, default=1, help='Read every Nth frame.')
+    parser.add_argument('-dist', '--dist', type=int, default=None, help='Generate bond distance distribution histogram with N bins. Output to output_dist.xvg')
     parser.add_argument('-debug', '--debug', action='store_true', help="Enable debug mode")
     
     return parser.parse_args()
@@ -178,7 +179,7 @@ def get_com(coords, groups_mol, mol_name, box=None):
     return com
 
 
-def compute_bonds_vectorized(ref_pos, sel_pos, box, rcut, calculate_lengths=False, debug_first_ref=False):
+def compute_bonds_vectorized(ref_pos, sel_pos, box, rcut, calculate_lengths=False, debug_first_ref=False, return_distances=False):
     """
     Detect bonds between reference and selection positions using vectorized operations.
     
@@ -192,13 +193,18 @@ def compute_bonds_vectorized(ref_pos, sel_pos, box, rcut, calculate_lengths=Fals
         rcut: cutoff distance for bond detection
         calculate_lengths: if True, also return bond lengths
         debug_first_ref: if True, return bond details for first ref particle
+        return_distances: if True, also return all bonded distances
     
     Returns:
         If debug_first_ref=False:
-            If calculate_lengths=False:
+            If calculate_lengths=False and return_distances=False:
                 n_bonds: number of bonds detected
-            If calculate_lengths=True:
+            If calculate_lengths=True and return_distances=False:
                 (n_bonds, avg_bond_length): tuple with count and average length
+            If calculate_lengths=False and return_distances=True:
+                (n_bonds, bonded_distances): all distances of bonded pairs
+            If both True:
+                (n_bonds, avg_bond_length, bonded_distances)
         If debug_first_ref=True:
             (n_bonds, avg_bond_length, bond_indices, bond_distances) where:
                 bond_indices: indices of sel atoms bonded with first ref
@@ -235,6 +241,20 @@ def compute_bonds_vectorized(ref_pos, sel_pos, box, rcut, calculate_lengths=Fals
             return n_bonds, 0.0, bonded_sel_indices, bonded_distances
         else:
             return n_bonds, bonded_sel_indices, bonded_distances
+    
+    if return_distances:
+        if n_bonds > 0:
+            bonded_distances = dist[bonds]
+        else:
+            bonded_distances = np.array([], dtype=np.float32)
+        
+        if calculate_lengths and n_bonds > 0:
+            avg_bond_length = np.mean(bonded_distances)
+            return n_bonds, avg_bond_length, bonded_distances
+        elif calculate_lengths:
+            return n_bonds, 0.0, bonded_distances
+        else:
+            return n_bonds, bonded_distances
     
     if calculate_lengths and n_bonds > 0:
         bond_lengths = dist[bonds]
@@ -288,13 +308,15 @@ def calculate_bonds(args, groups, box, groups_mol):
         groups_mol: dictionary of molecular groups
     
     Returns:
-        (bond_counts, bond_lengths_avg, total_frames)
+        (bond_counts, bond_lengths_avg, total_frames, bond_distances)
         bond_counts: (n_pairs, n_frames) array
         bond_lengths_avg: (n_pairs, n_frames) array if --BL flag set, else None
+        bond_distances: list of distance arrays if --dist specified, else None
     """
     npairs = len(args.ref)  # Explicit pairing: ref[i] with sel[i]
     frame_bonds = []
     frame_bond_lengths = [] if args.BL else None
+    bond_distances = [[] for _ in range(npairs)] if args.dist else None
     total_frames = 0
     
     with open(args.traj_file, 'r') as f:
@@ -324,7 +346,24 @@ def calculate_bonds(args, groups, box, groups_mol):
                     # Debug: print bonds for first ref molecule/atom
                     debug_flag = args.debug and i == 0 and total_frames == 0
                     
-                    if args.BL:
+                    if args.BL and args.dist:
+                        if debug_flag:
+                            result = compute_bonds_vectorized(
+                                ref_pos, sel_pos, box_frame, rcut_pair, calculate_lengths=True, debug_first_ref=True, return_distances=True
+                            )
+                            n_bonds, avg_length, bonded_sel_indices, bonded_distances = result[:4]
+                            logging.info(f"\n[DEBUG] Frame {total_frames}, Pair {ref_name}-{sel_name}:")
+                            logging.info(f"  First {ref_name}: {bonded_sel_indices.size} bonds")
+                            for sel_idx, dist_val in zip(bonded_sel_indices, bonded_distances):
+                                logging.info(f"    -> {sel_name}[{sel_idx}]: {dist_val:.6f} nm")
+                        else:
+                            n_bonds, avg_length, pair_distances = compute_bonds_vectorized(
+                                ref_pos, sel_pos, box_frame, rcut_pair, calculate_lengths=True, return_distances=True
+                            )
+                            bond_distances[i].extend(pair_distances)
+                        frame_bonds_data.append(int(n_bonds))
+                        frame_lengths_data.append(float(avg_length))
+                    elif args.BL:
                         if debug_flag:
                             result = compute_bonds_vectorized(
                                 ref_pos, sel_pos, box_frame, rcut_pair, calculate_lengths=True, debug_first_ref=True
@@ -340,6 +379,22 @@ def calculate_bonds(args, groups, box, groups_mol):
                             )
                         frame_bonds_data.append(int(n_bonds))
                         frame_lengths_data.append(float(avg_length))
+                    elif args.dist:
+                        if debug_flag:
+                            result = compute_bonds_vectorized(
+                                ref_pos, sel_pos, box_frame, rcut_pair, calculate_lengths=False, debug_first_ref=True, return_distances=True
+                            )
+                            n_bonds, bonded_sel_indices, bonded_distances = result[:3]
+                            logging.info(f"\n[DEBUG] Frame {total_frames}, Pair {ref_name}-{sel_name}:")
+                            logging.info(f"  First {ref_name}: {bonded_sel_indices.size} bonds")
+                            for sel_idx, dist_val in zip(bonded_sel_indices, bonded_distances):
+                                logging.info(f"    -> {sel_name}[{sel_idx}]: {dist_val:.6f} nm")
+                        else:
+                            n_bonds, pair_distances = compute_bonds_vectorized(
+                                ref_pos, sel_pos, box_frame, rcut_pair, calculate_lengths=False, return_distances=True
+                            )
+                            bond_distances[i].extend(pair_distances)
+                        frame_bonds_data.append(int(n_bonds))
                     else:
                         if debug_flag:
                             result = compute_bonds_vectorized(
@@ -389,7 +444,24 @@ def calculate_bonds(args, groups, box, groups_mol):
                     # Debug: print bonds for first ref molecule/atom
                     debug_flag = args.debug and i == 0 and total_frames == 0
                     
-                    if args.BL:
+                    if args.BL and args.dist:
+                        if debug_flag:
+                            result = compute_bonds_vectorized(
+                                ref_pos, sel_pos, box_frame, rcut_pair, calculate_lengths=True, debug_first_ref=True, return_distances=True
+                            )
+                            n_bonds, avg_length, bonded_sel_indices, bonded_distances = result[:4]
+                            logging.info(f"\n[DEBUG] Frame {total_frames}, Pair {ref_name}-{sel_name}:")
+                            logging.info(f"  First {ref_name}: {bonded_sel_indices.size} bonds")
+                            for sel_idx, dist_val in zip(bonded_sel_indices, bonded_distances):
+                                logging.info(f"    -> {sel_name}[{sel_idx}]: {dist_val:.6f} nm")
+                        else:
+                            n_bonds, avg_length, pair_distances = compute_bonds_vectorized(
+                                ref_pos, sel_pos, box_frame, rcut_pair, calculate_lengths=True, return_distances=True
+                            )
+                            bond_distances[i].extend(pair_distances)
+                        frame_bonds_data.append(int(n_bonds))
+                        frame_lengths_data.append(float(avg_length))
+                    elif args.BL:
                         if debug_flag:
                             result = compute_bonds_vectorized(
                                 ref_pos, sel_pos, box_frame, rcut_pair, calculate_lengths=True, debug_first_ref=True
@@ -405,6 +477,22 @@ def calculate_bonds(args, groups, box, groups_mol):
                             )
                         frame_bonds_data.append(int(n_bonds))
                         frame_lengths_data.append(float(avg_length))
+                    elif args.dist:
+                        if debug_flag:
+                            result = compute_bonds_vectorized(
+                                ref_pos, sel_pos, box_frame, rcut_pair, calculate_lengths=False, debug_first_ref=True, return_distances=True
+                            )
+                            n_bonds, bonded_sel_indices, bonded_distances = result[:3]
+                            logging.info(f"\n[DEBUG] Frame {total_frames}, Pair {ref_name}-{sel_name}:")
+                            logging.info(f"  First {ref_name}: {bonded_sel_indices.size} bonds")
+                            for sel_idx, dist_val in zip(bonded_sel_indices, bonded_distances):
+                                logging.info(f"    -> {sel_name}[{sel_idx}]: {dist_val:.6f} nm")
+                        else:
+                            n_bonds, pair_distances = compute_bonds_vectorized(
+                                ref_pos, sel_pos, box_frame, rcut_pair, calculate_lengths=False, return_distances=True
+                            )
+                            bond_distances[i].extend(pair_distances)
+                        frame_bonds_data.append(int(n_bonds))
                     else:
                         if debug_flag:
                             result = compute_bonds_vectorized(
@@ -439,7 +527,11 @@ def calculate_bonds(args, groups, box, groups_mol):
     else:
         bond_lengths_avg = None
     
-    return bond_counts, bond_lengths_avg, total_frames
+    # Convert bond_distances lists to numpy arrays
+    if args.dist:
+        bond_distances = [np.array(d, dtype=np.float32) if d else None for d in bond_distances]
+    
+    return bond_counts, bond_lengths_avg, total_frames, bond_distances
 
 
 def normalize_and_output(args, bond_counts, bond_lengths_avg, total_frames, ref_counts, sel_counts):
@@ -534,6 +626,70 @@ def normalize_and_output(args, bond_counts, bond_lengths_avg, total_frames, ref_
         bl_output_file = args.output_file.split('.')[0] + '_BL.' + args.output_file.split('.')[-1]
         np.savetxt(bl_output_file, np.column_stack(output_data_bl), header=header_bl, fmt='%10.6f')
         logging.info(f"Bond length data written to {bl_output_file}")
+
+
+def generate_distance_distribution(args, bond_distances, ref_counts, sel_counts):
+    """
+    Generate and write bond distance distribution histograms.
+    
+    Args:
+        args: command-line arguments (contains -dist N)
+        bond_distances: (n_pairs, total_bonded_pairs) list of distance arrays
+        ref_counts: reference particle/molecule counts
+        sel_counts: selection particle/molecule counts
+    """
+    if args.dist is None or bond_distances is None:
+        return
+    
+    logging.info("\n--- Bond Distance Distribution ---")
+    
+    n_pairs = len(args.ref)
+    n_bins = args.dist
+    
+    # Create output file
+    dist_output_file = args.output_file.split('.')[0] + '_dist.' + args.output_file.split('.')[-1]
+    
+    # Find the maximum rcut for x-axis
+    max_rcut = max(args.rcut)
+    
+    # Create bin edges: from 0 to max(rcut)
+    bin_edges = np.linspace(0, max_rcut, n_bins + 1)
+    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2.0
+    
+    output_data = [bin_centers]
+    header = "# distance(nm)"
+    
+    for i, (ref_name, sel_name) in enumerate(zip(args.ref, args.sel)):
+        rcut_pair = args.rcut[i]
+        
+        if bond_distances[i] is None or len(bond_distances[i]) == 0:
+            hist = np.zeros(n_bins)
+            logging.info(f"Distance distribution for pair {ref_name}-{sel_name}: No bonds found")
+        else:
+            # Create histogram with bin edges adjusted to the pair's rcut if needed
+            hist, _ = np.histogram(bond_distances[i], bins=bin_edges)
+            
+            logging.info(f"Distance distribution for pair {ref_name}-{sel_name}:")
+            logging.info(f"  Total bonded pairs: {len(bond_distances[i])}")
+            logging.info(f"  Min distance: {np.min(bond_distances[i]):.6f} nm")
+            logging.info(f"  Max distance: {np.max(bond_distances[i]):.6f} nm")
+            logging.info(f"  Mean distance: {np.mean(bond_distances[i]):.6f} nm")
+            logging.info(f"  Median distance: {np.median(bond_distances[i]):.6f} nm")
+            logging.info(f"  Histogram bins: {n_bins}, range: 0.0-{max_rcut:.3f} nm")
+        
+        output_data.append(hist)
+        header += f" hist_{ref_name}-{sel_name}"
+    
+    # Write distance distribution output
+    with open(dist_output_file, 'w') as f:
+        f.write(header + "\n")
+        np.savetxt(f, np.column_stack(output_data), fmt='%12.6f')
+        f.write("# Total number of Ref:\n")
+        f.write(f"# {', '.join([f'{name}: {int(count)}' for name, count in zip(args.ref, ref_counts)])}\n")
+        f.write("# Total number of sel:\n")
+        f.write(f"# {', '.join([f'{name}: {int(count)}' for name, count in zip(args.sel, sel_counts)])}\n")
+    
+    logging.info(f"Distance distribution data written to {dist_output_file}")
 
 
 def main():
@@ -737,11 +893,15 @@ def main():
     logging.info("\n--- Calculation ---")
     logging.info("Computing bond statistics using vectorized distance calculations...")
     
-    bond_counts, bond_lengths_avg, total_frames = calculate_bonds(args, groups, box, groups_mol)
+    bond_counts, bond_lengths_avg, total_frames, bond_distances = calculate_bonds(args, groups, box, groups_mol)
     logging.info(f"Total frames processed: {total_frames}")
     
     logging.info("\n--- Output ---")
     normalize_and_output(args, bond_counts, bond_lengths_avg, total_frames, ref_counts, sel_counts)
+    
+    # Generate distance distribution if requested
+    if args.dist:
+        generate_distance_distribution(args, bond_distances, ref_counts, sel_counts)
     
     # Report timing information
     t_end = time.time()
